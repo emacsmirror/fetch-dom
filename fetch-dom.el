@@ -42,7 +42,7 @@
 (defvar fetch-dom-wait-period-headless 0
   "Number of seconds to wait before returning result when headless.")
 
-(defvar fetch-dom-wait-period-popup 5
+(defvar fetch-dom-wait-period-popup 10
   "Number of seconds to wait before returning result when popping up window.")
 
 (defvar fetch-dom-cookie-file "~/.emacs.d/fetch-dom.pickle"
@@ -95,36 +95,46 @@ buffer containing the data)."
 	 (fetch-dom--return-result type))))))
 
 (defun fetch-dom--success (type host)
-  ;; Only add (at most) two entries of the same type -- we don't need
-  ;; more that that to keep track of what we're going to do.
-  (when (< (seq-count (lambda (elem) (eq elem type))
-		      (gethash host fetch-dom--host-values))
-	   2)
-    (push type (gethash host fetch-dom--host-values))))
+  (push type (gethash host fetch-dom--host-values)))
 
 (defun fetch-dom--failure (type host)
-  (setf (gethash host fetch-dom--host-values)
-	(delq type (gethash host fetch-dom--host-values)))
-  nil)
+  (let ((symbol (intern (format "fail-%s" type)))
+	(values (gethash host fetch-dom--host-values)))
+    (unless (eq (cadr values) symbol)
+      (push symbol (gethash host fetch-dom--host-values)))
+    nil))
 
 (defun fetch-dom--try-internal-p (host)
   (let ((values (gethash host fetch-dom--host-values)))
     ;; If we've never tried before, then let's try.
     (or (null values)
-	;; Or if we've got a previously successful one.
-	(memq 'internal values)
-	;; Or we've been through a successful higher-level one once.
-	(= (seq-count (lambda (elem) (eq elem 'headless)) values) 1)
-	(= (seq-count (lambda (elem) (eq elem 'popup)) values) 1))))
+	;; Or if we've got a previously successful one newer than a
+	;; failure.
+	(fetch-dom--newer-p 'internal 'fail-internal values)
+	;; Or we've been through a successful higher-level more
+	;; recently and there's no failures.
+	(and (eq (car values) 'headless)
+	     (not (eq (cadr values) 'headless)))
+	(and (eq (car values) 'popup)
+	     (not (eq (cadr values) 'popup))))))
 
 (defun fetch-dom--try-headless-p (host)
   (let ((values (gethash host fetch-dom--host-values)))
     ;; If we've never tried before, then let's try.
     (or (null values)
+	(not (eq (car values) 'popup))
 	;; Or if we've got a previously successful one.
-	(memq 'headless values)
+	(fetch-dom--newer-p 'headless 'fail-headless values)
 	;; Or we've been through a successful popup once.
-	(= (seq-count (lambda (elem) (eq elem 'popup)) values) 1))))
+	(and (eq (car values) 'popup)
+	     (not (eq (cadr values) 'popup))))))
+
+(defun fetch-dom--newer-p (type1 type2 values)
+  (let ((p1 (seq-position values type1))
+	(p2 (seq-position values type2)))
+    (and p1
+	 (or (null p2)
+	     (< p1 p2)))))
 
 (defun fetch-dom--got-result-p ()
   (let ((result
