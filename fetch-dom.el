@@ -42,7 +42,7 @@
 (defvar fetch-dom-wait-period-headless 0
   "Number of seconds to wait before returning result when headless.")
 
-(defvar fetch-dom-wait-period-popup 10
+(defvar fetch-dom-wait-period-popup 5
   "Number of seconds to wait before returning result when popping up window.")
 
 (defvar fetch-dom-cookie-file "~/.emacs.d/fetch-dom.pickle"
@@ -63,34 +63,88 @@ buffer containing the data)."
     (or
      ;; First try to fetch using url.el.
      (and
-      (memq (gethash host fetch-dom--host-values) '(nil internal))
+      (fetch-dom--try-internal-p host)
       (with-current-buffer (fetch-dom--internal url)
 	(goto-char (point-min))
-	(when (search-forward "\n\n" nil t)
+	(if (not (search-forward "\n\n" nil t))
+	    (progn
+	      (kill-buffer (current-buffer))
+	      nil)
 	  (delete-region (point-min) (point))
-	  (when (fetch-dom--got-result-p)
-	    (setf (gethash host fetch-dom--host-values) 'internal)
+	  (if (not (fetch-dom--got-result-p))
+	      (fetch-dom--failure 'internal host)
+	    (fetch-dom--success 'internal host)
 	    (fetch-dom--return-result type)))))
      (and
-      (memq (gethash host fetch-dom--host-values) '(internal headless popup))
+      (fetch-dom--try-headless-p host)
       (with-current-buffer (fetch-dom--selenium
 			    url "headless"
 			    (or wait-period-headless
 				fetch-dom-wait-period-headless))
-	(when (fetch-dom--got-result-p)
-	  (setf (gethash host fetch-dom--host-values) 'headless)
+	(if (not (fetch-dom--got-result-p))
+	    (fetch-dom--failure 'headless host)
+	  (fetch-dom--success 'headless host)
 	  (fetch-dom--return-result type))))
      (with-current-buffer (fetch-dom--selenium
 			    url "popup"
 			    (or wait-period-popup
 				fetch-dom-wait-period-popup))
-       (when (fetch-dom--got-result-p)
-	 (setf (gethash host fetch-dom--host-values) 'popup)
+       (if (not (fetch-dom--got-result-p))
+	   (fetch-dom--failure 'popup host)
+	 (fetch-dom--success 'popup host)
 	 (fetch-dom--return-result type))))))
 
+(defun fetch-dom--success (type host)
+  ;; Only add (at most) two entries of the same type -- we don't need
+  ;; more that that to keep track of what we're going to do.
+  (when (< (seq-count (lambda (elem) (eq elem type))
+		      (gethash host fetch-dom--host-values))
+	   2)
+    (push type (gethash host fetch-dom--host-values))))
+
+(defun fetch-dom--failure (type host)
+  (setf (gethash host fetch-dom--host-values)
+	(delq type (gethash host fetch-dom--host-values)))
+  nil)
+
+(defun fetch-dom--try-internal-p (host)
+  (let ((values (gethash host fetch-dom--host-values)))
+    ;; If we've never tried before, then let's try.
+    (or (null values)
+	;; Or if we've got a previously successful one.
+	(memq 'internal values)
+	;; Or we've been through a successful higher-level one once.
+	(= (seq-count (lambda (elem) (eq elem 'headless)) values) 1)
+	(= (seq-count (lambda (elem) (eq elem 'popup)) values) 1))))
+
+(defun fetch-dom--try-headless-p (host)
+  (let ((values (gethash host fetch-dom--host-values)))
+    ;; If we've never tried before, then let's try.
+    (or (null values)
+	;; Or if we've got a previously successful one.
+	(memq 'headless values)
+	;; Or we've been through a successful popup once.
+	(= (seq-count (lambda (elem) (eq elem 'popup)) values) 1))))
+
 (defun fetch-dom--got-result-p ()
-  (and (> (buffer-size) 10)
-       (libxml-parse-html-region (point-min) (point-max))))
+  (let ((result
+	 (and (> (buffer-size) 100)
+	      (> (fetch-dom--count (libxml-parse-html-region
+				    (point-min) (point-max)))
+		 100))))
+    (unless result
+      (kill-buffer (current-buffer)))
+    result))
+
+(defun fetch-dom--count (dom)
+  (let ((count 0)
+	func)
+    (setq func 
+	  (lambda (dom)
+	    (cl-incf count)
+	    (mapcar func (dom-non-text-children dom))))
+    (funcall func dom)
+    count))
 
 (defun fetch-dom--return-result (type)
   (pcase type
@@ -104,13 +158,15 @@ buffer containing the data)."
 
 (defun fetch-dom--internal (url)
   (let ((cookies
-	 (with-temp-buffer
-	   (let ((default-directory (file-name-directory
-				     (locate-library "fetch-dom"))))
-	     (call-process (expand-file-name "print-cookies.py") nil t nil
-			   (expand-file-name fetch-dom-cookie-file))
-	     (goto-char (point-min))
-	     (json-parse-buffer :object-type 'plist))))
+	 (and
+	  (file-exists-p fetch-dom-cookie-file)
+	  (with-temp-buffer
+	    (let ((default-directory (file-name-directory
+				      (locate-library "fetch-dom"))))
+	      (call-process (expand-file-name "print-cookies.py") nil t nil
+			    (expand-file-name fetch-dom-cookie-file))
+	      (goto-char (point-min))
+	      (json-parse-buffer :object-type 'plist)))))
 	;; Don't overwrite the user's real cookies.
 	(url-cookie-secure-storage nil)
 	(url-cookie-storage nil))
