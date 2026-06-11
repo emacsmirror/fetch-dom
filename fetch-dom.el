@@ -80,8 +80,7 @@ the result)."
       :type type))
     (unless callback
       (while (not done)
-	(sit-for 0.01)
-	(thread-yield))
+	(sit-for 0.01))
       (car done))))
 
 (defun fetch-dom--async-1 (call)
